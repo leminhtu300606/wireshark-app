@@ -1,0 +1,49 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# --- IDE ---
+.idea/
+.vscode/
+
+# --- Qt / PyQt ---
+# File UI sinh tự động bởi pyuic5 nếu bạn muốn bỏ qua
+ui_*.py
+
+# --- Build artifacts (PyInstaller, cx_Freeze, etc.) ---
+build/
+dist/
+*.spec
+
+# Logs / cache
+*.log
+*.cache/
+.cache/
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS-specific
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# --- Project specific ---
+# icons giữ lại -> không ignore
+# models giữ lại
+# threads giữ lại
+# utils giữ lại
+# views giữ lại
