@@ -1,27 +1,51 @@
 @echo off
 setlocal
 
-echo === Installing PcapQt environment ===
+:: Define URLs and filenames
+set "PYTHON_URL=https://www.python.org/ftp/python/3.11.13/python-3.11.13-amd64.exe"
+set "PYTHON_INSTALLER=python-3.11.13-amd64.exe"
+set "NPCAP_URL=https://nmap.org/npcap/dist/npcap-1.85.exe"
+set "NPCAP_INSTALLER=npcap-1.85.exe"
 
-set PROJECT_DIR=%~dp0
+echo ----------------------------------------------------------------------
+echo Starting automated setup...
+echo ----------------------------------------------------------------------
 
-REM Check .venv
-if exist "%PROJECT_DIR%.venv" (
-    echo [INFO] .venv found.
+:: 1. Download Python
+if exist "%PYTHON_INSTALLER%" (
+    echo %PYTHON_INSTALLER% already exists. Skipping download.
 ) else (
-    echo [INFO] .venv not found. Creating...
-    python -m venv "%PROJECT_DIR%.venv"
+    echo Downloading Python 3.11.13...
+    powershell -Command "Invoke-WebRequest -Uri '%PYTHON_URL%' -OutFile '%PYTHON_INSTALLER%'"
 )
 
-REM Activate venv
-echo [INFO] Activating virtual environment...
-call "%PROJECT_DIR%.venv\Scripts\activate.bat"
+:: 2. Download Npcap
+if exist "%NPCAP_INSTALLER%" (
+    echo %NPCAP_INSTALLER% already exists. Skipping download.
+) else (
+    echo Downloading Npcap 1.85...
+    powershell -Command "Invoke-WebRequest -Uri '%NPCAP_URL%' -OutFile '%NPCAP_INSTALLER%'"
+)
 
-REM Install project
-echo [INFO] Installing project locally...
-pip install --upgrade pip >nul
-pip install .
+echo.
+echo ----------------------------------------------------------------------
+echo Installing software...
+echo ----------------------------------------------------------------------
 
-echo [INFO] Install completed.
-endlocal
+:: 3. Install Python
+echo Installing Python 3.11...
+:: /passive displays progress bar but requires no user interaction.
+:: PrependPath=1 adds Python to environment variables.
+start /wait "" "%PYTHON_INSTALLER%" /passive PrependPath=1 ALLUSERS=1
+
+:: 4. Install Npcap
+echo Installing Npcap...
+:: /S runs in silent mode (no UI).
+start /wait "" "%NPCAP_INSTALLER%" /S
+
+echo.
+echo ----------------------------------------------------------------------
+echo Setup completed successfully!
+echo You may need to restart your computer or restart your terminal.
+echo ----------------------------------------------------------------------
 pause
