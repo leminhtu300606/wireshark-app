@@ -8,6 +8,11 @@ class PacketFilterModel(QSortFilterProxyModel):
     """
     Proxy model for filtering packet table.
     
+    Optimized with:
+        - Pre-compiled regex patterns for faster matching
+        - Cached filter results to avoid recomputation
+        - Direct data access instead of model.data() calls
+    
     Supported filter syntax:
         - Protocol: tcp, udp, icmp, arp
         - Application protocols: ssh, dns, http, https, ftp, smtp, pop3, imap, telnet, ntp, snmp, dhcp, tls
@@ -41,16 +46,54 @@ class PacketFilterModel(QSortFilterProxyModel):
         'postgresql': [5432],
     }
     
+    # Pre-compiled regex patterns for common port lookups
+    _port_regex_cache = {}
+    
+    # TCP-based protocols for quick lookup
+    TCP_PROTOCOLS = frozenset(['ssh', 'http', 'https', 'ftp', 'smtp', 'pop3', 'imap', 'telnet', 'tls'])
+    
+    # UDP-based protocols for quick lookup
+    UDP_PROTOCOLS = frozenset(['dns', 'dhcp', 'ntp', 'snmp', 'tftp'])
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.filter_expression = ""
         self.filter_tokens = []
+        self._has_or_operator = False
+        
+        # Cache for filter results (row_index -> result)
+        self._filter_cache = {}
+        self._cache_valid = False
     
     def set_filter(self, expression):
         """Set the filter expression and invalidate the filter."""
-        self.filter_expression = expression.strip().lower()
+        new_expression = expression.strip().lower()
+        
+        # Skip if expression hasn't changed
+        if new_expression == self.filter_expression:
+            return
+        
+        self.filter_expression = new_expression
         self.filter_tokens = self.parse_expression(self.filter_expression)
+        self._has_or_operator = any(t[0] == 'operator' and t[1] == 'or' for t in self.filter_tokens)
+        
+        # Invalidate cache
+        self._filter_cache.clear()
+        self._cache_valid = False
+        
         self.invalidateFilter()
+    
+    def invalidate_cache(self):
+        """Invalidate the filter cache when source data changes."""
+        self._filter_cache.clear()
+        self._cache_valid = False
+    
+    @classmethod
+    def _get_port_regex(cls, port):
+        """Get or create compiled regex for port matching."""
+        if port not in cls._port_regex_cache:
+            cls._port_regex_cache[port] = re.compile(rf'\b{port}\b')
+        return cls._port_regex_cache[port]
     
     def parse_expression(self, expression):
         """Parse filter expression into tokens."""
@@ -121,19 +164,31 @@ class PacketFilterModel(QSortFilterProxyModel):
         if not self.filter_tokens:
             return True
         
+        # Check cache first
+        if source_row in self._filter_cache:
+            return self._filter_cache[source_row]
+        
         model = self.sourceModel()
         if not model:
             return True
         
-        # Get row data
+        # Direct access to packet data (faster than model.data() calls)
+        if source_row >= len(model.packets):
+            return True
+        
+        packet_data = model.packets[source_row]
+        
+        # Build row_data with lowercase values
         # Columns: No., Time, Source, Destination, Protocol, Length, Info
-        row_data = []
-        for col in range(model.columnCount()):
-            index = model.index(source_row, col, source_parent)
-            row_data.append(str(model.data(index, Qt.DisplayRole) or "").lower())
+        row_data = [str(packet_data[i]).lower() for i in range(len(packet_data))]
         
         # Evaluate filter
-        return self.evaluate_filter(row_data)
+        result = self.evaluate_filter(row_data)
+        
+        # Cache result
+        self._filter_cache[source_row] = result
+        
+        return result
     
     def evaluate_filter(self, row_data):
         """Evaluate filter expression against row data."""
@@ -149,12 +204,18 @@ class PacketFilterModel(QSortFilterProxyModel):
                 continue
             
             result = self.evaluate_token(token_type, token_value, row_data)
+            
+            # Early exit optimization
+            if self._has_or_operator:
+                if result:
+                    return True  # OR: one True is enough
+            else:
+                if not result:
+                    return False  # AND: one False is enough
+            
             results.append(result)
         
-        # Check for OR operator
-        has_or = any(t[0] == 'operator' and t[1] == 'or' for t in self.filter_tokens)
-        
-        if has_or:
+        if self._has_or_operator:
             return any(results)
         else:
             return all(results)
@@ -166,7 +227,8 @@ class PacketFilterModel(QSortFilterProxyModel):
         if token_type == 'protocol':
             # Match protocol column exactly or check if it's a sub-protocol
             protocol = row_data[4]
-            return protocol == token_value.lower() or protocol.startswith(token_value.lower())
+            token_lower = token_value.lower()
+            return protocol == token_lower or protocol.startswith(token_lower)
         
         elif token_type == 'app_protocol':
             # Match by protocol name in protocol column OR by port in info column
@@ -174,15 +236,14 @@ class PacketFilterModel(QSortFilterProxyModel):
             info = row_data[6]
             
             # Check if protocol column matches
-            if token_value.upper() in protocol.upper():
+            if token_value in protocol:
                 return True
             
             # Check if any of the ports for this protocol appear in info
             ports = self.PROTOCOL_PORTS.get(token_value, [])
             for port in ports:
-                port_str = str(port)
-                # Check for port patterns like "22 →" or "→ 22" or just "22"
-                if re.search(rf'\b{port_str}\b', info):
+                regex = self._get_port_regex(port)
+                if regex.search(info):
                     return True
             
             return False
@@ -198,22 +259,22 @@ class PacketFilterModel(QSortFilterProxyModel):
         
         elif token_type == 'port':
             # Check in Info column for port numbers
-            port_str = str(token_value)
-            return re.search(rf'\b{port_str}\b', row_data[6]) is not None
+            regex = self._get_port_regex(token_value)
+            return regex.search(row_data[6]) is not None
         
         elif token_type == 'tcp_port':
             protocol = row_data[4]
-            if 'tcp' not in protocol.lower() and protocol.lower() not in ['ssh', 'http', 'https', 'ftp', 'smtp', 'pop3', 'imap', 'telnet', 'tls']:
+            if 'tcp' not in protocol and protocol not in self.TCP_PROTOCOLS:
                 return False
-            port_str = str(token_value)
-            return re.search(rf'\b{port_str}\b', row_data[6]) is not None
+            regex = self._get_port_regex(token_value)
+            return regex.search(row_data[6]) is not None
         
         elif token_type == 'udp_port':
             protocol = row_data[4]
-            if 'udp' not in protocol.lower() and protocol.lower() not in ['dns', 'dhcp', 'ntp', 'snmp', 'tftp']:
+            if 'udp' not in protocol and protocol not in self.UDP_PROTOCOLS:
                 return False
-            port_str = str(token_value)
-            return re.search(rf'\b{port_str}\b', row_data[6]) is not None
+            regex = self._get_port_regex(token_value)
+            return regex.search(row_data[6]) is not None
         
         elif token_type == 'text':
             # Search in all columns

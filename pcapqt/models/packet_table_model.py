@@ -45,6 +45,36 @@ class PacketTableModel(QAbstractTableModel):
         self.beginInsertRows(QModelIndex(), row, row)
         self.packets.append(packet_data)
         self.endInsertRows()
+    
+    def add_packets(self, packets_data_list):
+        """Add multiple packets at once for better performance.
+        
+        This method uses a single beginInsertRows/endInsertRows pair
+        to batch insert all packets, reducing UI update overhead.
+        """
+        if not packets_data_list:
+            return
+        
+        start_row = len(self.packets)
+        end_row = start_row + len(packets_data_list) - 1
+        
+        self.beginInsertRows(QModelIndex(), start_row, end_row)
+        self.packets.extend(packets_data_list)
+        self.endInsertRows()
+    
+    def remove_oldest_packets(self, count):
+        """Remove oldest packets from the model.
+        
+        Args:
+            count: Number of oldest packets to remove
+        """
+        if count <= 0 or not self.packets:
+            return
+        
+        count = min(count, len(self.packets))
+        self.beginRemoveRows(QModelIndex(), 0, count - 1)
+        self.packets = self.packets[count:]
+        self.endRemoveRows()
 
     def clear(self):
         self.beginResetModel()

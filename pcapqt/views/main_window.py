@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QLineEdit, QLabel, QMenu, QAction, QMessageBox
+    QMainWindow, QLineEdit, QLabel, QMenu, QAction, QMessageBox,
+    QComboBox, QInputDialog
 )
 from PyQt5.QtCore import QTimer, Qt, QMutex, QMutexLocker
 from PyQt5.QtGui import QFont
@@ -47,6 +48,10 @@ class PcapQt(QMainWindow):
         self.ui.packageTableView.setSelectionMode(self.ui.packageTableView.SingleSelection)
         self.ui.packageTableView.setAlternatingRowColors(True)
         
+        # Set fixed row height for better scrolling performance (lazy loading optimization)
+        self.ui.packageTableView.verticalHeader().setDefaultSectionSize(22)
+        self.ui.packageTableView.verticalHeader().setSectionResizeMode(self.ui.packageTableView.verticalHeader().Fixed)
+        
         # Enable context menu for package table
         self.ui.packageTableView.setContextMenuPolicy(Qt.CustomContextMenu)
         self.ui.packageTableView.customContextMenuRequested.connect(self.show_context_menu)
@@ -68,7 +73,23 @@ class PcapQt(QMainWindow):
         # Batch update timer (reduces UI updates)
         self.batch_timer = QTimer()
         self.batch_timer.timeout.connect(self.process_packet_queue)
-        self.batch_timer.start(50)  # Process queue every 50ms
+        self.batch_timer.start(100)  # Process queue every 100ms for better performance
+        
+        # Packet limit (0 = unlimited)
+        self.packet_limit = 0
+        self.PACKET_LIMIT_OPTIONS = {
+            'Unlimited': 0,
+            '10,000': 10000,
+            '20,000': 20000,
+            '50,000': 50000,
+            'Custom...': -1  # Special value to trigger input dialog
+        }
+        
+        # Filter debounce timer (delays filter application for smoother typing)
+        self.filter_debounce_timer = QTimer()
+        self.filter_debounce_timer.setSingleShot(True)
+        self.filter_debounce_timer.timeout.connect(self._apply_debounced_filter)
+        self._pending_filter_text = ""
 
         # State variables
         self.raw_packets = []
@@ -88,8 +109,9 @@ class PcapQt(QMainWindow):
         self.scroll_check_timer.timeout.connect(self.check_if_at_bottom)
         self.scroll_check_timer.start(100)
 
-        # Setup filter bar
+        # Setup filter bar and packet limit dropdown
         self.setup_filter_bar()
+        self.setup_packet_limit_dropdown()
 
         # Connect signals
         self.ui.startCapture.toggled.connect(self.toggle_capture)
@@ -127,13 +149,72 @@ class PcapQt(QMainWindow):
         # Add to toolbar layout
         self.ui.horizontalLayout.addWidget(QLabel("Filter:"))
         self.ui.horizontalLayout.addWidget(self.filter_input)
+    
+    def setup_packet_limit_dropdown(self):
+        """Setup the packet limit dropdown in the toolbar."""
+        self.packet_limit_combo = QComboBox()
+        self.packet_limit_combo.setMinimumWidth(100)
+        self.packet_limit_combo.setStyleSheet("""
+            QComboBox {
+                padding: 4px 8px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background: white;
+            }
+        """)
+        
+        # Add options
+        for label in self.PACKET_LIMIT_OPTIONS.keys():
+            self.packet_limit_combo.addItem(label)
+        
+        self.packet_limit_combo.currentTextChanged.connect(self.on_packet_limit_changed)
+        
+        # Add to toolbar
+        self.ui.horizontalLayout.addWidget(QLabel("  Limit:"))
+        self.ui.horizontalLayout.addWidget(self.packet_limit_combo)
+    
+    def on_packet_limit_changed(self, text):
+        """Handle packet limit dropdown change."""
+        value = self.PACKET_LIMIT_OPTIONS.get(text, 0)
+        
+        if value == -1:  # Custom
+            limit, ok = QInputDialog.getInt(
+                self, 'Custom Packet Limit',
+                'Enter maximum number of packets:',
+                value=50000, min=1000, max=1000000, step=1000
+            )
+            if ok:
+                self.packet_limit = limit
+                # Update combo box text to show custom value
+                self.packet_limit_combo.setItemText(
+                    self.packet_limit_combo.currentIndex(),
+                    f'Custom ({limit:,})'
+                )
+            else:
+                # Reset to Unlimited if cancelled
+                self.packet_limit_combo.setCurrentIndex(0)
+                self.packet_limit = 0
+        else:
+            self.packet_limit = value
+        
+        # Apply limit immediately if we have more packets than allowed
+        if self.packet_limit > 0 and len(self.raw_packets) > self.packet_limit:
+            self._enforce_packet_limit()
 
     def on_filter_changed(self, text):
-        """Handle filter text change - apply filter in real-time."""
-        self.filter_model.set_filter(text)
+        """Handle filter text change with debounce for smoother typing."""
+        self._pending_filter_text = text
+        # Debounce: wait 300ms after last keystroke before applying filter
+        self.filter_debounce_timer.start(300)
+    
+    def _apply_debounced_filter(self):
+        """Apply the pending filter after debounce delay."""
+        self.filter_model.set_filter(self._pending_filter_text)
 
     def apply_filter(self):
-        """Apply the current filter."""
+        """Apply the current filter immediately (on Enter key)."""
+        # Cancel debounce timer and apply immediately
+        self.filter_debounce_timer.stop()
         self.filter_model.set_filter(self.filter_input.text())
 
     def show_interface_dialog(self):
@@ -276,6 +357,9 @@ class PcapQt(QMainWindow):
         self.raw_packets.clear()
         self.current_packet_index = -1
         self.auto_scroll_enabled = True
+        
+        # Invalidate filter cache
+        self.filter_model.invalidate_cache()
 
         if self.ui.startCapture.isChecked():
             self.ui.startCapture.setChecked(False)
@@ -316,6 +400,7 @@ class PcapQt(QMainWindow):
             
             # Batch insert packets to model (reduces UI updates)
             packets_data = []
+            raw_packets_to_add = []
             for packet_bytes, packet_data in packets_to_process:
                 # Reconstruct packet from bytes on main thread (thread-safe)
                 try:
@@ -323,12 +408,18 @@ class PcapQt(QMainWindow):
                 except Exception:
                     # If Ether parsing fails, store raw bytes
                     packet = packet_bytes
-                self.raw_packets.append(packet)
+                raw_packets_to_add.append(packet)
                 packets_data.append(packet_data)
             
-            # Add all packets at once if possible
-            for packet_data in packets_data:
-                self.packet_model.add_packet(packet_data)
+            # Add raw packets to list
+            self.raw_packets.extend(raw_packets_to_add)
+            
+            # Add all packets at once using batch method (single UI update)
+            self.packet_model.add_packets(packets_data)
+            
+            # Enforce packet limit if set
+            if self.packet_limit > 0:
+                self._enforce_packet_limit()
             
             # Auto-scroll using scrollbar (faster than scrollTo)
             if self.auto_scroll_enabled and packets_to_process:
@@ -339,6 +430,22 @@ class PcapQt(QMainWindow):
         except Exception as e:
             print(f"Error processing packet queue: {e}")
             traceback.print_exc()
+    
+    def _enforce_packet_limit(self):
+        """Remove oldest packets if we exceed the limit."""
+        if self.packet_limit <= 0:
+            return
+        
+        excess = len(self.raw_packets) - self.packet_limit
+        if excess > 0:
+            # Remove oldest packets from raw_packets list
+            self.raw_packets = self.raw_packets[excess:]
+            # Remove oldest packets from model
+            self.packet_model.remove_oldest_packets(excess)
+            
+            # Adjust current packet index if needed
+            if self.current_packet_index >= 0:
+                self.current_packet_index = max(0, self.current_packet_index - excess)
     
     def _scroll_to_bottom(self):
         """Helper method to scroll to bottom."""
