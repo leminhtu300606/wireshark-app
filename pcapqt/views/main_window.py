@@ -76,9 +76,13 @@ class PcapQt(QMainWindow):
         self.auto_scroll_enabled = True
         self.ui.detailButton.setChecked(False)
 
-        # Scroll handling
+        # Scroll handling - track last scroll position for direction detection
+        self.last_scroll_value = 0
         scrollbar = self.ui.packageTableView.verticalScrollBar()
         scrollbar.valueChanged.connect(self.on_scroll_changed)
+        
+        # Click detection for stopping autoscroll
+        self.ui.packageTableView.clicked.connect(self.on_packet_clicked)
         
         self.scroll_check_timer = QTimer()
         self.scroll_check_timer.timeout.connect(self.check_if_at_bottom)
@@ -214,21 +218,47 @@ class PcapQt(QMainWindow):
         QApplication.clipboard().setText(info)
 
     def on_scroll_changed(self, value):
+        """Handle scroll changes - stop autoscroll when user scrolls up."""
         scrollbar = self.ui.packageTableView.verticalScrollBar()
         
-        if scrollbar.maximum() - value <= 10:
-            if not self.auto_scroll_enabled:
-                self.auto_scroll_enabled = True
-        else:
-            if self.auto_scroll_enabled:
-                self.auto_scroll_enabled = False
+        # Detect scroll direction
+        if value < self.last_scroll_value:
+            # Scrolling UP - immediately stop autoscroll
+            self.auto_scroll_enabled = False
+        elif scrollbar.maximum() - value <= 5:
+            # At bottom - re-enable autoscroll
+            self.auto_scroll_enabled = True
+        
+        self.last_scroll_value = value
 
     def check_if_at_bottom(self):
+        """Periodically check if scrolled to bottom to re-enable autoscroll."""
         scrollbar = self.ui.packageTableView.verticalScrollBar()
         
-        if scrollbar.maximum() - scrollbar.value() <= 10:
+        if scrollbar.maximum() - scrollbar.value() <= 5:
             if not self.auto_scroll_enabled and len(self.raw_packets) > 0:
                 self.auto_scroll_enabled = True
+                self.last_scroll_value = scrollbar.value()
+    
+    def on_packet_clicked(self, index):
+        """Handle click on packet - stop autoscroll and show details."""
+        if not index.isValid():
+            return
+        
+        # Stop autoscroll when user clicks
+        self.auto_scroll_enabled = False
+        
+        # Show detail panel if not already visible
+        if not self.ui.detailButton.isChecked():
+            self.ui.detailButton.setChecked(True)
+        
+        # Display details for clicked packet
+        source_index = self.filter_model.mapToSource(index)
+        row = source_index.row()
+        if row < len(self.raw_packets):
+            self.current_packet_index = row
+            packet = self.raw_packets[row]
+            self.display_packet_details(packet)
 
     def toggle_capture(self, checked):
         if checked:
