@@ -130,6 +130,48 @@ class PcapQt(QMainWindow):
         
         # Setup IP statistics tracking
         self.setup_ip_statistics()
+        
+        # Setup capture mode selector
+        self.setup_capture_mode()
+    
+    def setup_capture_mode(self):
+        """Setup capture mode selector (Normal, Ping, Tracert)."""
+        import subprocess
+        self._network_process = None
+        
+        # Separator
+        separator = QLabel(" | ")
+        self.ui.horizontalLayout.addWidget(separator)
+        
+        # Mode label
+        mode_label = QLabel("Mode:")
+        self.ui.horizontalLayout.addWidget(mode_label)
+        
+        # Capture mode dropdown
+        self.capture_mode_combo = QComboBox()
+        self.capture_mode_combo.addItems(["Normal", "Ping", "Tracert"])
+        self.capture_mode_combo.setStyleSheet(
+            "QComboBox { padding: 4px 8px; border: 1px solid #ccc; "
+            "border-radius: 4px; background: white; min-width: 80px; }"
+        )
+        self.capture_mode_combo.currentTextChanged.connect(self._on_capture_mode_changed)
+        self.ui.horizontalLayout.addWidget(self.capture_mode_combo)
+        
+        # Target IP input (for Ping/Tracert)
+        self.target_ip_input = QLineEdit()
+        self.target_ip_input.setPlaceholderText("Target IP/Host")
+        self.target_ip_input.setMaximumWidth(150)
+        self.target_ip_input.setStyleSheet(
+            "QLineEdit { padding: 4px 8px; border: 1px solid #ccc; "
+            "border-radius: 4px; background: white; }"
+        )
+        self.target_ip_input.setVisible(False)  # Hidden by default
+        self.ui.horizontalLayout.addWidget(self.target_ip_input)
+    
+    def _on_capture_mode_changed(self, mode):
+        """Handle capture mode change."""
+        # Show/hide target input based on mode
+        self.target_ip_input.setVisible(mode in ["Ping", "Tracert"])
     
     def setup_ip_statistics(self):
         """Setup IP request statistics tracking and button."""
@@ -437,9 +479,49 @@ class PcapQt(QMainWindow):
 
     def toggle_capture(self, checked):
         if checked:
+            # Start network tool based on capture mode
+            mode = self.capture_mode_combo.currentText()
+            target = self.target_ip_input.text().strip()
+            
+            if mode in ["Ping", "Tracert"] and not target:
+                QMessageBox.warning(self, "Warning", f"Please enter target IP/Host for {mode} mode.")
+                self.ui.startCapture.setChecked(False)
+                return
+            
+            # Start sniffer first
             self.sniffer.start()
+            
+            # Start network tool if needed
+            if mode == "Ping" and target:
+                self._start_network_tool(["ping", "-t", target])
+            elif mode == "Tracert" and target:
+                self._start_network_tool(["tracert", target])
         else:
+            # Stop network tool if running
+            self._stop_network_tool()
             self.sniffer.stop()
+    
+    def _start_network_tool(self, command):
+        """Start a network tool (ping/tracert) in background."""
+        import subprocess
+        try:
+            self._network_process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        except Exception as e:
+            print(f"Failed to start {command[0]}: {e}")
+    
+    def _stop_network_tool(self):
+        """Stop running network tool."""
+        if hasattr(self, '_network_process') and self._network_process:
+            try:
+                self._network_process.terminate()
+                self._network_process = None
+            except:
+                pass
 
     def restart_capture(self):
         if self.sniffer.isRunning():
