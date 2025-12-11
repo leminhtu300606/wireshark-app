@@ -25,7 +25,11 @@ class PacketTableModel(QAbstractTableModel):
             return packet_data[index.column()]
         elif role == Qt.BackgroundRole:
             protocol = packet_data[4]
-            if protocol == 'TCP':
+            
+            # Check for IPv6 by looking for 'IPv6' in protocol string
+            if 'IPv6' in str(protocol):
+                return QColor(200, 220, 255)  # Light blue for IPv6
+            elif protocol == 'TCP':
                 return QColor(231, 230, 255)
             elif protocol == 'UDP':
                 return QColor(218, 238, 255)

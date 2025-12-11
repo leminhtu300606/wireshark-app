@@ -11,12 +11,13 @@ Layer 6 (Presentation): Data encoding, encryption, compression
 Layer 7 (Application): Protocol-specific data
 """
 
-from scapy.all import Ether, IP, TCP, UDP, ICMP, ARP, Raw, DNS
+from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMP, ARP, Raw, DNS
 from datetime import datetime
 import struct
 import binascii
 
 from .dns_resolver import get_dns_resolver
+from .hostname_resolver import get_hostname_resolver
 
 from .protocol_parsers import (
     WELL_KNOWN_PORTS,
@@ -50,17 +51,23 @@ class PacketParser:
             'time': (datetime.now() - start_time).total_seconds(),
             'src': 'Unknown', 'dst': 'Unknown',
             'protocol': 'Unknown', 'length': len(packet), 'info': '',
-            'src_name': '', 'dst_name': ''  # Hostname resolution
+            'src_name': '', 'dst_name': '',  # Domain names from DNS
+            'src_device': '', 'dst_device': '',  # Device names (hostname/NetBIOS)
+            'src_mac': '', 'dst_mac': ''  # MAC addresses
         }
-
         if Ether in packet:
             info['src'] = packet[Ether].src
             info['dst'] = packet[Ether].dst
+            info['src_mac'] = packet[Ether].src
+            info['dst_mac'] = packet[Ether].dst
+
+        # Extract device names from various protocols
+        hostname_resolver = get_hostname_resolver()
+        extracted_hostnames = hostname_resolver.extract_hostnames_from_packet(packet)
 
         if IP in packet:
             info['src'] = packet[IP].src
             info['dst'] = packet[IP].dst
-            info['protocol'] = packet[IP].proto
             
             # Try to resolve hostnames from DNS cache
             resolver = get_dns_resolver()
@@ -70,18 +77,23 @@ class PacketParser:
                 info['src_name'] = src_name
             if dst_name:
                 info['dst_name'] = dst_name
+            
+            # Get device names from extracted protocols
+            if extracted_hostnames.get('src'):
+                info['src_device'] = extracted_hostnames['src']
+            if extracted_hostnames.get('src_mac'):
+                info['src_device'] = extracted_hostnames['src_mac']
 
             if TCP in packet:
                 sport, dport = packet[TCP].sport, packet[TCP].dport
                 app_proto = PacketParser._detect_app_protocol(packet, sport, dport)
-                info['protocol'] = app_proto if app_proto else 'TCP'
-                info['protocol'] = app_proto if app_proto else 'TCP'
                 
-                # Enhanced TLS info
-                if app_proto == 'TLS':
-                    tls_ver = PacketParser._get_tls_details(packet)
-                    if tls_ver:
-                        info['protocol'] = tls_ver
+                # Get all detected Layer 7 protocols for better searchability
+                all_protocols = PacketParser._detect_all_app_protocols(packet, sport, dport)
+                if all_protocols:
+                    info['protocol'] = ' | '.join(all_protocols)
+                else:
+                    info['protocol'] = app_proto if app_proto else 'TCP'
                 
                 # Enhanced Info for HTTP
                 if app_proto == 'HTTP':
@@ -106,7 +118,13 @@ class PacketParser:
             elif UDP in packet:
                 sport, dport = packet[UDP].sport, packet[UDP].dport
                 app_proto = PacketParser._detect_app_protocol(packet, sport, dport)
-                info['protocol'] = app_proto if app_proto else 'UDP'
+                
+                # Get all detected Layer 7 protocols for better searchability
+                all_protocols = PacketParser._detect_all_app_protocols(packet, sport, dport)
+                if all_protocols:
+                    info['protocol'] = ' | '.join(all_protocols)
+                else:
+                    info['protocol'] = app_proto if app_proto else 'UDP'
                 
                 # Enhanced info for UDP protocols
                 if app_proto == 'DNS':
@@ -128,8 +146,98 @@ class PacketParser:
                 info['protocol'] = 'ICMP'
                 info['info'] = f"Type: {packet[ICMP].type}"
             
-            # Append hostname to info if resolved
-            if info['dst_name']:
+            # Append device name if available, else domain name
+            if info['src_device']:
+                info['info'] += f" [Device: {info['src_device']}]"
+            elif info['dst_name']:
+                info['info'] += f" (→ {info['dst_name']})"
+            elif info['src_name'] and not info['info'].endswith(')'):
+                info['info'] += f" (← {info['src_name']})"
+        elif IPv6 in packet:
+            info['src'] = packet[IPv6].src
+            info['dst'] = packet[IPv6].dst
+            
+            # Try to resolve hostnames from DNS cache
+            resolver = get_dns_resolver()
+            src_name = resolver.get_domain_for_ip(packet[IPv6].src)
+            dst_name = resolver.get_domain_for_ip(packet[IPv6].dst)
+            if src_name:
+                info['src_name'] = src_name
+            if dst_name:
+                info['dst_name'] = dst_name
+            
+            # Get device names from extracted protocols
+            if extracted_hostnames.get('src'):
+                info['src_device'] = extracted_hostnames['src']
+            if extracted_hostnames.get('src_mac'):
+                info['src_device'] = extracted_hostnames['src_mac']
+
+            if TCP in packet:
+                sport, dport = packet[TCP].sport, packet[TCP].dport
+                app_proto = PacketParser._detect_app_protocol(packet, sport, dport)
+                
+                # Get all detected Layer 7 protocols for better searchability
+                all_protocols = PacketParser._detect_all_app_protocols(packet, sport, dport)
+                if all_protocols:
+                    info['protocol'] = 'IPv6 | ' + ' | '.join(all_protocols)
+                else:
+                    info['protocol'] = 'IPv6 | ' + (app_proto if app_proto else 'TCP')
+                
+                # Enhanced Info for HTTP
+                if app_proto == 'HTTP':
+                     http_info = PacketParser._get_http_info(packet)
+                     if http_info:
+                         info['info'] = http_info
+                     else:
+                         info['info'] = f"{sport} → {dport} [Flags: {packet[TCP].flags}]"
+                elif app_proto == 'TLS' or (info['protocol'] and 'TLS' in info['protocol']):
+                    tls_info = PacketParser._get_tls_info(packet, sport, dport)
+                    if tls_info:
+                        info['info'] = tls_info
+                    else:
+                        info['info'] = f"{sport} → {dport} [Flags: {packet[TCP].flags}]"
+                else:
+                    # Generic enhanced info for all other TCP protocols
+                    extra_info = PacketParser._get_generic_protocol_info(packet, app_proto, sport, dport)
+                    if extra_info:
+                        info['info'] = f"{sport} → {dport} {extra_info}"
+                    else:
+                        info['info'] = f"{sport} → {dport} [Flags: {packet[TCP].flags}]"
+            elif UDP in packet:
+                sport, dport = packet[UDP].sport, packet[UDP].dport
+                app_proto = PacketParser._detect_app_protocol(packet, sport, dport)
+                
+                # Get all detected Layer 7 protocols for better searchability
+                all_protocols = PacketParser._detect_all_app_protocols(packet, sport, dport)
+                if all_protocols:
+                    info['protocol'] = 'IPv6 | ' + ' | '.join(all_protocols)
+                else:
+                    info['protocol'] = 'IPv6 | ' + (app_proto if app_proto else 'UDP')
+                
+                # Enhanced info for UDP protocols
+                if app_proto == 'DNS':
+                    dns_info = PacketParser._get_dns_info(packet)
+                    if dns_info:
+                        info['info'] = dns_info
+                    else:
+                        info['info'] = f"{sport} → {dport}"
+                elif app_proto == 'QUIC':
+                    info['info'] = f"{sport} → {dport} (QUIC Encrypted)"
+                else:
+                    # Generic enhanced info for all other UDP protocols
+                    extra_info = PacketParser._get_generic_protocol_info(packet, app_proto, sport, dport)
+                    if extra_info:
+                        info['info'] = f"{sport} → {dport} {extra_info}"
+                    else:
+                        info['info'] = f"{sport} → {dport}"
+            else:
+                info['protocol'] = 'IPv6'
+                info['info'] = f"{packet[IPv6].src} → {packet[IPv6].dst}"
+            
+            # Append device name if available, else domain name
+            if info['src_device']:
+                info['info'] += f" [Device: {info['src_device']}]"
+            elif info['dst_name']:
                 info['info'] += f" (→ {info['dst_name']})"
             elif info['src_name'] and not info['info'].endswith(')'):
                 info['info'] += f" (← {info['src_name']})"
@@ -300,6 +408,275 @@ class PacketParser:
         if sport == 27960 or dport == 27960:
             return 'Quake3'
         return None
+
+    @staticmethod
+    def _detect_all_app_protocols(packet, sport, dport):
+        """Detect ALL possible application layer protocols based on ports and payload.
+        
+        Returns a list of all detected Layer 7 protocols.
+        """
+        protocols = []
+        
+        # DNS
+        if sport == 53 or dport == 53:
+            protocols.append('DNS')
+        
+        # HTTP/HTTPS related
+        if sport == 80 or dport == 80 or sport == 8080 or dport == 8080:
+            if Raw in packet and PacketParser._is_http(bytes(packet[Raw].load)):
+                protocols.append('HTTP')
+        
+        if sport == 443 or dport == 443 or sport == 8443 or dport == 8443:
+            if UDP in packet:
+                protocols.append('QUIC')
+            else:
+                protocols.append('TLS')
+        
+        # DHCP
+        if sport in (67, 68) or dport in (67, 68):
+            protocols.append('DHCP')
+        
+        # mDNS
+        if sport == 5353 or dport == 5353:
+            protocols.append('mDNS')
+        
+        # LLMNR
+        if sport == 5355 or dport == 5355:
+            protocols.append('LLMNR')
+        
+        # SSDP
+        if sport == 1900 or dport == 1900:
+            protocols.append('SSDP')
+        
+        # NetBIOS
+        if sport in (137, 138, 139) or dport in (137, 138, 139):
+            protocols.append('NetBIOS')
+        
+        # SMB
+        if sport == 445 or dport == 445:
+            protocols.append('SMB')
+        
+        # FTP
+        if sport == 21 or dport == 21:
+            protocols.append('FTP')
+        
+        if sport == 20 or dport == 20:
+            protocols.append('FTP-Data')
+        
+        # SMTP/Email
+        if sport == 25 or dport == 25 or sport == 587 or dport == 587 or sport == 465 or dport == 465:
+            protocols.append('SMTP')
+        
+        # SSH
+        if sport == 22 or dport == 22:
+            protocols.append('SSH')
+        
+        # POP3
+        if sport == 110 or dport == 110 or sport == 995 or dport == 995:
+            protocols.append('POP3')
+        
+        # IMAP
+        if sport == 143 or dport == 143 or sport == 993 or dport == 993:
+            protocols.append('IMAP')
+        
+        # NTP
+        if sport == 123 or dport == 123:
+            protocols.append('NTP')
+        
+        # SNMP
+        if sport == 161 or dport == 161 or sport == 162 or dport == 162:
+            protocols.append('SNMP')
+        
+        # Telnet
+        if sport == 23 or dport == 23:
+            protocols.append('Telnet')
+        
+        # LDAP
+        if sport == 389 or dport == 389 or sport == 636 or dport == 636:
+            protocols.append('LDAP')
+        
+        # RDP
+        if sport == 3389 or dport == 3389:
+            protocols.append('RDP')
+        
+        # Databases
+        if sport == 3306 or dport == 3306:
+            protocols.append('MySQL')
+        
+        if sport == 5432 or dport == 5432:
+            protocols.append('PostgreSQL')
+        
+        if sport == 1433 or dport == 1433:
+            protocols.append('MSSQL')
+        
+        if sport == 1521 or dport == 1521:
+            protocols.append('Oracle')
+        
+        if sport == 27017 or dport == 27017:
+            protocols.append('MongoDB')
+        
+        if sport == 6379 or dport == 6379:
+            protocols.append('Redis')
+        
+        # TFTP
+        if sport == 69 or dport == 69:
+            protocols.append('TFTP')
+        
+        # SIP
+        if sport == 5060 or dport == 5060 or sport == 5061 or dport == 5061:
+            protocols.append('SIP')
+        
+        # Kerberos
+        if sport == 88 or dport == 88:
+            protocols.append('Kerberos')
+        
+        # MS-RPC
+        if sport == 135 or dport == 135:
+            protocols.append('MS-RPC')
+        
+        # Syslog
+        if sport == 514 or dport == 514:
+            protocols.append('Syslog')
+        
+        # IRC
+        if sport == 6667 or dport == 6667:
+            protocols.append('IRC')
+        
+        # BGP
+        if sport == 179 or dport == 179:
+            protocols.append('BGP')
+        
+        # IKE
+        if sport == 500 or dport == 500:
+            protocols.append('IKE')
+        
+        # OpenVPN
+        if sport == 1194 or dport == 1194:
+            protocols.append('OpenVPN')
+        
+        # STUN
+        if sport == 3478 or dport == 3478 or sport == 3479 or dport == 3479:
+            protocols.append('STUN')
+        
+        # RADIUS
+        if sport == 1812 or dport == 1812 or sport == 1813 or dport == 1813:
+            protocols.append('RADIUS')
+        
+        # RTSP
+        if sport == 554 or dport == 554:
+            protocols.append('RTSP')
+        
+        # RTP/RTCP
+        if (sport >= 16384 and sport <= 32767) or (dport >= 16384 and dport <= 32767):
+            if UDP in packet:
+                protocols.append('RTP/RTCP')
+        
+        # VPN/Tunneling
+        if sport == 1701 or dport == 1701:
+            protocols.append('L2TP')
+        
+        if sport == 1723 or dport == 1723:
+            protocols.append('PPTP')
+        
+        if sport == 4500 or dport == 4500:
+            protocols.append('IPSec-NAT')
+        
+        # HSRP
+        if sport == 1985 or dport == 1985:
+            protocols.append('HSRP')
+        
+        # RIP
+        if sport == 520 or dport == 520:
+            protocols.append('RIP')
+        
+        # RTP (generic)
+        if sport == 5004 or dport == 5004 or sport == 5005 or dport == 5005:
+            protocols.append('RTP')
+        
+        # RADIUS (alternate ports)
+        if sport == 1645 or dport == 1645 or sport == 1646 or dport == 1646:
+            protocols.append('RADIUS')
+        
+        # TACACS
+        if sport == 49 or dport == 49:
+            protocols.append('TACACS')
+        
+        # SOCKS
+        if sport == 1080 or dport == 1080:
+            protocols.append('SOCKS')
+        
+        # HTTP Proxy
+        if sport == 8080 or dport == 8080:
+            if Raw in packet and PacketParser._is_http(bytes(packet[Raw].load)):
+                if 'HTTP' not in protocols:
+                    protocols.append('HTTP-Proxy')
+        
+        # HTTPS Alt
+        if sport == 8443 or dport == 8443:
+            if 'TLS' not in protocols:
+                protocols.append('HTTPS-Alt')
+        
+        # PHP-FPM
+        if sport == 9000 or dport == 9000:
+            protocols.append('PHP-FPM')
+        
+        # Elasticsearch
+        if sport == 9200 or dport == 9200:
+            protocols.append('Elasticsearch')
+        
+        # Kubernetes
+        if sport == 6443 or dport == 6443:
+            protocols.append('Kubernetes')
+        
+        # NFS
+        if sport == 2049 or dport == 2049:
+            protocols.append('NFS')
+        
+        # Portmapper
+        if sport == 111 or dport == 111:
+            protocols.append('Portmapper')
+        
+        # rsync
+        if sport == 873 or dport == 873:
+            protocols.append('rsync')
+        
+        # Squid Proxy
+        if sport == 3128 or dport == 3128:
+            protocols.append('Squid')
+        
+        # Telnet (SSH alternative)
+        if sport == 2222 or dport == 2222:
+            protocols.append('SSH-Alt')
+        
+        # RDP (alternate port)
+        if sport == 3390 or dport == 3390:
+            protocols.append('RDP-Alt')
+        
+        # MySQL (alternate)
+        if sport == 3307 or dport == 3307:
+            protocols.append('MySQL-Alt')
+        
+        # Postgres (alternate)
+        if sport == 5433 or dport == 5433:
+            protocols.append('PostgreSQL-Alt')
+        
+        # TeamViewer
+        if sport == 5938 or dport == 5938:
+            protocols.append('TeamViewer')
+        
+        # VNC
+        if sport == 5900 or dport == 5900:
+            protocols.append('VNC')
+        
+        # RTMP
+        if sport == 1935 or dport == 1935:
+            protocols.append('RTMP')
+        
+        # Game servers
+        if sport == 27960 or dport == 27960:
+            protocols.append('Quake3')
+        
+        return protocols
 
     @staticmethod
     def _is_http(payload):
@@ -713,9 +1090,14 @@ class PacketParser:
         return ', '.join(flag_list) if flag_list else 'None'
 
     @staticmethod
+    @staticmethod
     def get_packet_details(packet, packet_index):
         """Get detailed packet information for all OSI layers."""
         details = []
+        
+        # Extract device names first
+        hostname_resolver = get_hostname_resolver()
+        extracted_hostnames = hostname_resolver.extract_hostnames_from_packet(packet)
         
         # === Layer 1: Physical ===
         details.append(['=== Layer 1: Physical (Frame) ===', ''])
@@ -728,6 +1110,15 @@ class PacketParser:
             details.append(['=== Layer 2: Data Link (Ethernet II) ===', ''])
             details.append(['Destination MAC', packet[Ether].dst])
             details.append(['Source MAC', packet[Ether].src])
+            
+            # Show device names for MACs if available
+            hostname_by_src_mac = hostname_resolver.get_hostname_by_mac(packet[Ether].src)
+            hostname_by_dst_mac = hostname_resolver.get_hostname_by_mac(packet[Ether].dst)
+            if hostname_by_src_mac:
+                details.append(['Source Device Name', hostname_by_src_mac])
+            if hostname_by_dst_mac:
+                details.append(['Destination Device Name', hostname_by_dst_mac])
+            
             ether_type = packet[Ether].type
             ETHER_TYPE_NAMES = {
                 0x0800: 'IPv4', 0x0806: 'ARP', 0x86DD: 'IPv6',
@@ -759,7 +1150,44 @@ class PacketParser:
             details.append(['Protocol', f"{packet[IP].proto} ({PacketParser.get_protocol_name(packet[IP].proto)})"])
             details.append(['Checksum', f"0x{packet[IP].chksum:04x}"])
             details.append(['Source IP', packet[IP].src])
+            
+            # Show device name for source IP if available
+            src_device = hostname_resolver.get_hostname(packet[IP].src)
+            if src_device:
+                details.append(['Source Device', src_device])
+            
             details.append(['Destination IP', packet[IP].dst])
+            
+            # Show device name for destination IP if available
+            dst_device = hostname_resolver.get_hostname(packet[IP].dst)
+            if dst_device:
+                details.append(['Destination Device', dst_device])
+
+        if IPv6 in packet:
+            details.append(['=== Layer 3: Network (IPv6) ===', ''])
+            details.append(['Version', packet[IPv6].version])
+            details.append(['Traffic Class', f"0x{packet[IPv6].tc:02x}"])
+            details.append(['Flow Label', f"0x{packet[IPv6].fl:05x}"])
+            details.append(['Payload Length', f"{packet[IPv6].plen} bytes"])
+            details.append(['Next Header', f"{packet[IPv6].nh}"])
+            details.append(['Hop Limit', packet[IPv6].hlim])
+            details.append(['Source IP', packet[IPv6].src])
+            
+            # Show device name for source IP if available
+            src_device = hostname_resolver.get_hostname(packet[IPv6].src)
+            if src_device:
+                details.append(['Source Device', src_device])
+            
+            details.append(['Destination IP', packet[IPv6].dst])
+            
+            # Show device name for destination IP if available
+            dst_device = hostname_resolver.get_hostname(packet[IPv6].dst)
+            if dst_device:
+                details.append(['Destination Device', dst_device])
+            details.append(['Next Header', f"{packet[IPv6].nh}"])
+            details.append(['Hop Limit', packet[IPv6].hlim])
+            details.append(['Source IP', packet[IPv6].src])
+            details.append(['Destination IP', packet[IPv6].dst])
 
         if ARP in packet:
             details.append(['=== Layer 3: Network (ARP) ===', ''])
