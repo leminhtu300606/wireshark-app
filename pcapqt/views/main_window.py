@@ -9,6 +9,7 @@ from PyQt5.QtCore import QTimer, Qt, QMutex, QMutexLocker
 from PyQt5.QtGui import QFont
 from scapy.all import TCP, UDP, IP, Ether
 import traceback
+import socket
 from collections import defaultdict
 
 from ..ui_pcapqt import Ui_PcapQt
@@ -130,6 +131,9 @@ class PcapQt(QMainWindow):
         
         # Setup IP statistics tracking
         self.setup_ip_statistics()
+        
+        # Setup attack detection
+        self.setup_attack_detection()
     
     
     def setup_ip_statistics(self):
@@ -212,6 +216,96 @@ class PcapQt(QMainWindow):
         layout.addLayout(btn_layout)
         
         dialog.exec_()
+
+    def setup_attack_detection(self):
+        """Setup attack detection based on packet count from single source."""
+        # Track incoming packets per source IP
+        self.incoming_packet_counts = defaultdict(int)
+        # Track outgoing packets (from local IP)
+        self.outgoing_packet_count = 0
+        # Local IP address (will be set when interface is selected)
+        self.local_ip = None
+        # Attack detection threshold
+        self.attack_threshold = 100
+        # Flag to prevent multiple alerts
+        self.attack_alert_shown = False
+    
+    def get_local_ip(self):
+        """Get local IP address of the selected interface."""
+        try:
+            if self.selected_interface:
+                # Try to get IP from interface using scapy
+                from scapy.all import get_if_addr
+                local_ip = get_if_addr(self.selected_interface)
+                if local_ip and local_ip != '0.0.0.0':
+                    return local_ip
+            
+            # Fallback: get default local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Doesn't actually connect, just gets local IP
+                s.connect(('8.8.8.8', 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception as e:
+            print(f"Could not get local IP: {e}")
+            return None
+    
+    def check_attack_detection(self, src_ip, dst_ip):
+        """Check for potential attack based on packet counts.
+        
+        Attack detected when:
+        - Packets from a single source > 100
+        - AND packets from that source > total outgoing packets from local
+        
+        Returns:
+            tuple: (is_attack, attacker_ip, packet_count) or (False, None, 0)
+        """
+        if not src_ip or src_ip == 'Unknown':
+            return False, None, 0
+        
+        # Update local IP if not set
+        if self.local_ip is None:
+            self.local_ip = self.get_local_ip()
+        
+        # Track packets
+        if self.local_ip and src_ip == self.local_ip:
+            # Outgoing packet from local
+            self.outgoing_packet_count += 1
+        else:
+            # Incoming packet from external source
+            self.incoming_packet_counts[src_ip] += 1
+            
+            # Check attack condition
+            incoming_count = self.incoming_packet_counts[src_ip]
+            if (incoming_count > self.attack_threshold and 
+                incoming_count > self.outgoing_packet_count and
+                not self.attack_alert_shown):
+                return True, src_ip, incoming_count
+        
+        return False, None, 0
+    
+    def show_attack_alert(self, attacker_ip, packet_count):
+        """Show attack alert and stop capture."""
+        self.attack_alert_shown = True
+        
+        # Stop capture
+        if self.sniffer.isRunning():
+            self.sniffer.stop()
+            self.ui.startCapture.setChecked(False)
+        
+        # Show critical warning
+        QMessageBox.critical(
+            self,
+            "⚠️ CẢNH BÁO TẤN CÔNG MẠNG!",
+            f"<b>Phát hiện tấn công tiềm năng!</b><br><br>"
+            f"<b>IP nguồn tấn công:</b> {attacker_ip}<br>"
+            f"<b>Số gói tin từ nguồn:</b> {packet_count}<br>"
+            f"<b>Số gói tin từ thiết bị local:</b> {self.outgoing_packet_count}<br><br>"
+            f"<b style='color: red;'>Capture đã được dừng tự động!</b><br><br>"
+            f"Vui lòng kiểm tra và xử lý trước khi tiếp tục."
+        )
 
     def setup_filter_bar(self):
         """Setup the filter input in the toolbar."""
@@ -455,6 +549,12 @@ class PcapQt(QMainWindow):
         
         # Invalidate filter cache
         self.filter_model.invalidate_cache()
+        
+        # Reset attack detection
+        self.incoming_packet_counts.clear()
+        self.outgoing_packet_count = 0
+        self.local_ip = None
+        self.attack_alert_shown = False
 
         if self.ui.startCapture.isChecked():
             self.ui.startCapture.setChecked(False)
@@ -469,6 +569,16 @@ class PcapQt(QMainWindow):
         try:
             # Update IP statistics
             self.update_ip_statistics(packet_info['src'])
+            
+            # Check for attack detection
+            src_ip = packet_info['src']
+            dst_ip = packet_info['dst']
+            is_attack, attacker_ip, packet_count = self.check_attack_detection(src_ip, dst_ip)
+            
+            if is_attack:
+                # Schedule alert on main thread
+                QTimer.singleShot(0, lambda: self.show_attack_alert(attacker_ip, packet_count))
+                return  # Don't process more packets after detecting attack
             
             packet_data = [
                 packet_info['no'],

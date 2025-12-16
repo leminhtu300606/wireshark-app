@@ -33,6 +33,7 @@ class ThreatType(Enum):
     FIN_SCAN = "FIN Scan"
     DNS_AMPLIFICATION = "DNS Amplification"
     BRUTE_FORCE = "Brute Force"
+    PACKET_FLOOD_ATTACK = "Packet Flood Attack"
 
 
 @dataclass
