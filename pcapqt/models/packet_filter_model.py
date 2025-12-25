@@ -44,6 +44,8 @@ class PacketFilterModel(QSortFilterProxyModel):
         'redis': [6379],
         'mongodb': [27017],
         'postgresql': [5432],
+        'gocator': [3490],
+        'lmnart': [54915],
     }
     
     # Pre-compiled regex patterns for common port lookups

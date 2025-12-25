@@ -9,7 +9,8 @@ WELL_KNOWN_PORTS = {
     161: 'SNMP', 162: 'SNMP-Trap', 443: 'HTTPS', 465: 'SMTPS',
     587: 'SMTP-Submission', 993: 'IMAPS', 995: 'POP3S',
     3306: 'MySQL', 3389: 'RDP', 5432: 'PostgreSQL', 6379: 'Redis',
-    8080: 'HTTP-Alt', 8443: 'HTTPS-Alt', 27017: 'MongoDB'
+    8080: 'HTTP-Alt', 8443: 'HTTPS-Alt', 27017: 'MongoDB',
+    3490: 'Gocator', 54915: 'Lmnart'
 }
 
 # Protocol to port mapping for filtering

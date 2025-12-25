@@ -145,6 +145,42 @@ class PacketParser:
             elif ICMP in packet:
                 info['protocol'] = 'ICMP'
                 info['info'] = f"Type: {packet[ICMP].type}"
+            else:
+                # Handle other IP protocols (IGMP, GRE, ESP, etc.)
+                proto_num = packet[IP].proto
+                proto_names = {
+                    1: 'ICMP',
+                    2: 'IGMP',
+                    4: 'IP-in-IP',
+                    6: 'TCP',
+                    17: 'UDP',
+                    41: 'IPv6-Encap',
+                    47: 'GRE',
+                    50: 'ESP',
+                    51: 'AH',
+                    58: 'ICMPv6',
+                    89: 'OSPF',
+                    103: 'PIM',
+                    112: 'VRRP',
+                    132: 'SCTP',
+                }
+                proto_name = proto_names.get(proto_num, f'IP-Proto-{proto_num}')
+                info['protocol'] = proto_name
+                
+                # Add specific info based on protocol
+                dst = packet[IP].dst
+                if proto_num == 2:  # IGMP
+                    # Check if multicast
+                    if dst.startswith('224.') or dst.startswith('239.'):
+                        info['info'] = f"Multicast Group: {dst}"
+                    else:
+                        info['info'] = f"IGMP → {dst}"
+                elif proto_num == 89:  # OSPF
+                    info['info'] = f"OSPF Router Communication"
+                elif proto_num == 112:  # VRRP
+                    info['info'] = f"Virtual Router Redundancy"
+                else:
+                    info['info'] = f"{packet[IP].src} → {dst}"
             
             # Append device name if available, else domain name
             if info['src_device']:
@@ -231,7 +267,25 @@ class PacketParser:
                     else:
                         info['info'] = f"{sport} → {dport}"
             else:
-                info['protocol'] = 'IPv6'
+                # Handle other IPv6 protocols (ICMPv6, etc.)
+                nh = packet[IPv6].nh  # Next Header
+                nh_names = {
+                    0: 'IPv6-HopByHop',
+                    6: 'IPv6 | TCP',
+                    17: 'IPv6 | UDP',
+                    43: 'IPv6-Routing',
+                    44: 'IPv6-Fragment',
+                    50: 'IPv6 | ESP',
+                    51: 'IPv6 | AH',
+                    58: 'IPv6 | ICMPv6',
+                    59: 'IPv6-NoNext',
+                    60: 'IPv6-DestOpts',
+                    89: 'IPv6 | OSPF',
+                    103: 'IPv6 | PIM',
+                    132: 'IPv6 | SCTP',
+                }
+                proto_name = nh_names.get(nh, f'IPv6 | Proto-{nh}')
+                info['protocol'] = proto_name
                 info['info'] = f"{packet[IPv6].src} → {packet[IPv6].dst}"
             
             # Append device name if available, else domain name
@@ -407,6 +461,10 @@ class PacketParser:
             return 'RTMP'
         if sport == 27960 or dport == 27960:
             return 'Quake3'
+        if sport == 3490 or dport == 3490:
+            return 'Gocator'
+        if sport == 54915 or dport == 54915:
+            return 'Lmnart'
         return None
 
     @staticmethod
@@ -675,6 +733,14 @@ class PacketParser:
         # Game servers
         if sport == 27960 or dport == 27960:
             protocols.append('Quake3')
+        
+        # Gocator
+        if sport == 3490 or dport == 3490:
+            protocols.append('Gocator')
+            
+        # Lmnart
+        if sport == 54915 or dport == 54915:
+            protocols.append('Lmnart')
         
         return protocols
 
@@ -1343,7 +1409,8 @@ class PacketParser:
         # === Layer 7: Application ===
         details.append(['=== Layer 7: Application ===', ''])
         app_proto = PacketParser._detect_app_protocol(packet, sport, dport) or 'Unknown'
-        details.append(['Protocol', app_proto])
+        if app_proto != 'Unknown':
+            details.append(['Protocol', app_proto])
         port_info = WELL_KNOWN_PORTS.get(dport) or WELL_KNOWN_PORTS.get(sport)
         if port_info:
             details.append(['Service', port_info])
