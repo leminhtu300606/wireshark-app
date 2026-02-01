@@ -9,7 +9,6 @@ from PyQt5.QtCore import QTimer, Qt, QMutex, QMutexLocker
 from PyQt5.QtGui import QFont
 from scapy.all import TCP, UDP, IP, Ether
 import traceback
-import socket
 from collections import defaultdict
 
 from ..ui_pcapqt import Ui_PcapQt
@@ -131,9 +130,6 @@ class PcapQt(QMainWindow):
         
         # Setup IP statistics tracking
         self.setup_ip_statistics()
-        
-        # Setup attack detection
-        self.setup_attack_detection()
     
     
     def setup_ip_statistics(self):
@@ -217,120 +213,7 @@ class PcapQt(QMainWindow):
         
         dialog.exec_()
 
-    def setup_attack_detection(self):
-        """Setup attack detection based on packet count from single source."""
-        # Track incoming packets per source IP
-        self.incoming_packet_counts = defaultdict(int)
-        # Track outgoing packets (from local IP)
-        self.outgoing_packet_count = 0
-        # Local IP addresses (auto-detected IPv4 and IPv6)
-        self.local_ips = self._get_local_ips()
-        # Attack detection threshold
-        self.attack_threshold = 100
-        # Flag to prevent multiple alerts
-        self.attack_alert_shown = False
-    
-    def _get_local_ips(self):
-        """Auto-detect all local IP addresses (IPv4 and IPv6) of this machine."""
-        local_ips = set()
-        try:
-            # Method 1: Using psutil (most reliable)
-            import psutil
-            for iface_name, addrs in psutil.net_if_addrs().items():
-                for addr in addrs:
-                    if addr.family == socket.AF_INET:  # IPv4
-                        if addr.address and addr.address != '127.0.0.1':
-                            local_ips.add(addr.address)
-                    elif addr.family == socket.AF_INET6:  # IPv6
-                        # Remove zone ID if present (e.g., %eth0)
-                        ipv6 = addr.address.split('%')[0]
-                        if ipv6 and ipv6 != '::1':
-                            local_ips.add(ipv6)
-            print(f"[Attack Detection] Detected local IPs: {local_ips}")
-        except ImportError:
-            # Fallback if psutil not available
-            try:
-                # Get IPv4
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                try:
-                    s.connect(('8.8.8.8', 80))
-                    local_ips.add(s.getsockname()[0])
-                finally:
-                    s.close()
-                
-                # Try to get IPv6
-                try:
-                    s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-                    s6.connect(('2001:4860:4860::8888', 80))
-                    local_ips.add(s6.getsockname()[0])
-                    s6.close()
-                except:
-                    pass
-                print(f"[Attack Detection] Detected local IPs (fallback): {local_ips}")
-            except Exception as e:
-                print(f"Could not get local IP: {e}")
-        except Exception as e:
-            print(f"Could not get local IPs: {e}")
-        
-        return local_ips
-    
-    def check_attack_detection(self, src_ip, dst_ip):
-        """Check for potential attack based on packet counts.
-        
-        Attack detected when:
-        - Packets from a single source > 100
-        - AND packets from that source > total outgoing packets from local
-        
-        Returns:
-            tuple: (is_attack, attacker_ip, packet_count) or (False, None, 0)
-        """
-        if not src_ip or src_ip == 'Unknown':
-            return False, None, 0
-        
-        # Track packets - check if src_ip is one of local IPs (IPv4 or IPv6)
-        if src_ip in self.local_ips:
-            # Outgoing packet from local
-            self.outgoing_packet_count += 1
-        else:
-            # Incoming packet from external source
-            self.incoming_packet_counts[src_ip] += 1
-            
-            # Check attack condition:
-            # 1. Packets from source > threshold (100)
-            # 2. Packets from source > outgoing packets
-            # 3. Ratio incoming/outgoing > 10 (to avoid false positive during download/streaming)
-            incoming_count = self.incoming_packet_counts[src_ip]
-            outgoing = max(self.outgoing_packet_count, 1)  # Avoid division by zero
-            ratio = incoming_count / outgoing
-            
-            if (incoming_count > self.attack_threshold and 
-                incoming_count > self.outgoing_packet_count and
-                ratio > 10 and  # NEW: Ratio must be > 10x
-                not self.attack_alert_shown):
-                return True, src_ip, incoming_count
-        
-        return False, None, 0
-    
-    def show_attack_alert(self, attacker_ip, packet_count):
-        """Show attack alert and stop capture."""
-        self.attack_alert_shown = True
-        
-        # Stop capture
-        if self.sniffer.isRunning():
-            self.sniffer.stop()
-            self.ui.startCapture.setChecked(False)
-        
-        # Show critical warning
-        QMessageBox.critical(
-            self,
-            "⚠️ CẢNH BÁO TẤN CÔNG MẠNG!",
-            f"<b>Phát hiện tấn công tiềm năng!</b><br><br>"
-            f"<b>IP nguồn tấn công:</b> {attacker_ip}<br>"
-            f"<b>Số gói tin từ nguồn:</b> {packet_count}<br>"
-            f"<b>Số gói tin từ thiết bị local:</b> {self.outgoing_packet_count}<br><br>"
-            f"<b style='color: red;'>Capture đã được dừng tự động!</b><br><br>"
-            f"Vui lòng kiểm tra và xử lý trước khi tiếp tục."
-        )
+
 
     def setup_filter_bar(self):
         """Setup the filter input in the toolbar."""
@@ -574,11 +457,6 @@ class PcapQt(QMainWindow):
         
         # Invalidate filter cache
         self.filter_model.invalidate_cache()
-        
-        # Reset attack detection counters (keep local_ips as configured)
-        self.incoming_packet_counts.clear()
-        self.outgoing_packet_count = 0
-        self.attack_alert_shown = False
 
         if self.ui.startCapture.isChecked():
             self.ui.startCapture.setChecked(False)
@@ -593,18 +471,6 @@ class PcapQt(QMainWindow):
         try:
             # Update IP statistics
             self.update_ip_statistics(packet_info['src'])
-            
-            # Check for attack detection
-            src_ip = packet_info['src']
-            dst_ip = packet_info['dst']
-            is_attack, attacker_ip, packet_count = self.check_attack_detection(src_ip, dst_ip)
-            
-            if is_attack:
-                # Set flag IMMEDIATELY to prevent multiple alerts
-                self.attack_alert_shown = True
-                # Schedule alert on main thread
-                QTimer.singleShot(0, lambda: self.show_attack_alert(attacker_ip, packet_count))
-                return  # Don't process more packets after detecting attack
             
             packet_data = [
                 packet_info['no'],
