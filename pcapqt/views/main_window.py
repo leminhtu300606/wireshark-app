@@ -20,7 +20,8 @@ from ..utils.packet_parser import PacketParser
 from ..utils.stream_analyzer import StreamAnalyzer
 from .interface_dialog import InterfaceDialog
 from .stream_dialog import StreamDialog
-
+from .statistics_dialog import StatisticsDialog
+import time
 
 class PcapQt(QMainWindow):
 
@@ -134,8 +135,10 @@ class PcapQt(QMainWindow):
     
     def setup_ip_statistics(self):
         """Setup IP request statistics tracking and button."""
-        # Track request counts per IP
-        self.ip_request_counts = defaultdict(int)
+        # Track detailed stats per IP: { 'ip': { 'count': 0, 'name': '', 'last_seen': t, 'history': [] } }
+        self.ip_stats = {}
+        # Blocked IPs set
+        self.blocked_ips = set()
         
         # Statistics button in toolbar
         self.stats_btn = QPushButton("📊 IP Stats")
@@ -147,70 +150,53 @@ class PcapQt(QMainWindow):
         self.stats_btn.clicked.connect(self.show_ip_statistics)
         self.ui.horizontalLayout.addWidget(self.stats_btn)
     
-    def update_ip_statistics(self, src_ip):
-        """Update request count for an IP address."""
-        if src_ip and src_ip != 'Unknown':
-            self.ip_request_counts[src_ip] += 1
-    
+    def update_ip_statistics(self, packet_info):
+        """Update request count and metadata for an IP address."""
+        src_ip = packet_info.get('src')
+        if not src_ip or src_ip == 'Unknown':
+            return
+            
+        now = time.time()
+        
+        if src_ip not in self.ip_stats:
+            self.ip_stats[src_ip] = {
+                'count': 0,
+                'name': packet_info.get('src_name') or packet_info.get('src_device') or '',
+                'last_seen': now,
+                'history': []
+            }
+            
+        stats = self.ip_stats[src_ip]
+        stats['count'] += 1
+        stats['last_seen'] = now
+        stats['history'].append(now)
+        
+        # Keep only last 60 seconds of history for charting
+        # This prevents the list from growing indefinitely
+        stats['history'] = [t for t in stats['history'] if now - t <= 60]
+        
+        # Update name if it was empty but now available
+        if not stats['name']:
+            stats['name'] = packet_info.get('src_name') or packet_info.get('src_device') or ''
+
+    def block_ip(self, ip):
+        """Add IP to blocked list."""
+        self.blocked_ips.add(ip)
+
+    def unblock_ip(self, ip):
+        """Remove IP from blocked list."""
+        if ip in self.blocked_ips:
+            self.blocked_ips.remove(ip)
+
     def show_ip_statistics(self):
-        """Show IP request statistics dialog."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("IP Request Statistics")
-        dialog.setMinimumSize(500, 400)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # Info label
-        info_label = QLabel(f"Total IPs tracked: {len(self.ip_request_counts)}")
-        info_label.setStyleSheet("font-weight: bold; padding: 5px;")
-        layout.addWidget(info_label)
-        
-        # Table
-        table = QTableWidget()
-        table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["IP Address", "Request Count"])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        table.setAlternatingRowColors(True)
-        
-        # Sort by count descending
-        sorted_ips = sorted(self.ip_request_counts.items(), key=lambda x: x[1], reverse=True)
-        table.setRowCount(len(sorted_ips))
-        
-        for row, (ip, count) in enumerate(sorted_ips):
-            table.setItem(row, 0, QTableWidgetItem(ip))
-            count_item = QTableWidgetItem(str(count))
-            count_item.setTextAlignment(Qt.AlignCenter)
-            table.setItem(row, 1, count_item)
-        
-        layout.addWidget(table)
-        
-        # Button layout
-        from PyQt5.QtWidgets import QHBoxLayout
-        btn_layout = QHBoxLayout()
-        
-        # Reset button
-        reset_btn = QPushButton("🔄 Reset")
-        reset_btn.setStyleSheet(
-            "QPushButton { background-color: #FFCDD2; color: #C62828; padding: 6px 16px; "
-            "border-radius: 4px; font-weight: bold; }"
+        """Show the enhanced IP statistics and blocking dialog."""
+        dialog = StatisticsDialog(
+            self.ip_stats, 
+            self.blocked_ips, 
+            self.block_ip, 
+            self.unblock_ip, 
+            self
         )
-        def reset_stats():
-            self.ip_request_counts.clear()
-            table.setRowCount(0)
-            info_label.setText("Total IPs tracked: 0")
-            QMessageBox.information(dialog, "Reset", "IP statistics have been reset.")
-        reset_btn.clicked.connect(reset_stats)
-        btn_layout.addWidget(reset_btn)
-        
-        btn_layout.addStretch()
-        
-        # Close button
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dialog.accept)
-        btn_layout.addWidget(close_btn)
-        
-        layout.addLayout(btn_layout)
-        
         dialog.exec_()
 
 
@@ -469,8 +455,13 @@ class PcapQt(QMainWindow):
             packet_info: Parsed packet information dict
         """
         try:
+            # Check if source IP is blocked
+            src_ip = packet_info.get('src')
+            if src_ip in self.blocked_ips:
+                return
+                
             # Update IP statistics
-            self.update_ip_statistics(packet_info['src'])
+            self.update_ip_statistics(packet_info)
             
             packet_data = [
                 packet_info['no'],
